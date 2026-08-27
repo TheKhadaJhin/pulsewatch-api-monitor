@@ -1,49 +1,129 @@
 @baseUrl = http://127.0.0.1:8000
+@api = {{baseUrl}}/api/v1
+@apiKey = replace-with-PULSEWATCH_ADMIN_API_KEY
 
-### Application health
-GET {{baseUrl}}/api/health
+### Process liveness
+GET {{api}}/health/live
+X-Request-ID: manual-live-check
 
-### Add a monitored API
-POST {{baseUrl}}/api/services
+### Database readiness
+GET {{api}}/health/ready
+
+### Public capability configuration
+GET {{api}}/config
+
+### Register a scheduled endpoint
+POST {{api}}/services
 Content-Type: application/json
+X-API-Key: {{apiKey}}
+X-Request-ID: create-github-api
 
 {
   "name": "GitHub API",
+  "description": "Public API availability",
   "url": "https://api.github.com",
   "method": "GET",
   "expected_status": 200,
   "timeout_seconds": 5,
-  "retry_count": 2
+  "retry_count": 2,
+  "check_interval_seconds": 300,
+  "active": true,
+  "tags": ["public-api", "demo"]
 }
 
-### List monitored services
-GET {{baseUrl}}/api/services
+### List all services
+GET {{api}}/services?limit=100&offset=0
+
+### List active services only
+GET {{api}}/services?active_only=true
+
+### Get one service
+GET {{api}}/services/1
+
+### Change schedule and tags
+PATCH {{api}}/services/1
+Content-Type: application/json
+Authorization: Bearer {{apiKey}}
+
+{
+  "check_interval_seconds": 60,
+  "retry_count": 1,
+  "tags": ["public-api", "priority"]
+}
+
+### Pause a service without deleting its history
+PATCH {{api}}/services/1
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+{
+  "active": false
+}
+
+### Resume a service (also makes it due immediately)
+PATCH {{api}}/services/1
+Content-Type: application/json
+X-API-Key: {{apiKey}}
+
+{
+  "active": true
+}
 
 ### Run every active check
-POST {{baseUrl}}/api/checks/run
+POST {{api}}/checks/run
 Content-Type: application/json
+X-API-Key: {{apiKey}}
 
 {}
 
-### Run one check
-POST {{baseUrl}}/api/checks/run
+### Run selected checks with an explicit concurrency limit
+POST {{api}}/checks/run
 Content-Type: application/json
+X-API-Key: {{apiKey}}
+X-Request-ID: selected-check-demo
 
 {
   "service_ids": [1],
   "concurrency": 1
 }
 
-### View recent results
-GET {{baseUrl}}/api/checks?limit=25
+### View recent checks
+GET {{api}}/checks?limit=25&offset=0
+
+### Filter scheduled checks for one service
+GET {{api}}/checks?service_id=1&trigger=scheduled&limit=25
 
 ### View seven-day reliability metrics
-GET {{baseUrl}}/api/summary?window_hours=168
+GET {{api}}/summary?window_hours=168
 
-### Disable a service without deleting its history
-PATCH {{baseUrl}}/api/services/1
-Content-Type: application/json
+### View all incidents
+GET {{api}}/incidents?limit=50
 
-{
-  "active": false
-}
+### View open incidents
+GET {{api}}/incidents?status=open
+
+### View scheduler status
+GET {{api}}/operations/scheduler
+
+### Run one due-service scheduler cycle
+POST {{api}}/operations/scheduler/run
+X-API-Key: {{apiKey}}
+
+### Run retention immediately
+POST {{api}}/operations/retention/run
+X-API-Key: {{apiKey}}
+
+### View webhook delivery history
+GET {{api}}/operations/notifications?limit=50
+X-API-Key: {{apiKey}}
+
+### View mutation and operation audit history
+GET {{api}}/operations/audit?limit=50
+X-API-Key: {{apiKey}}
+
+### Prometheus metrics
+GET {{baseUrl}}/metrics
+
+### Delete a service and its operational history
+DELETE {{api}}/services/1
+X-API-Key: {{apiKey}}

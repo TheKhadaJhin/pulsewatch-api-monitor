@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  validate-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Validate
+        run: |
+          ruff format --check .
+          ruff check .
+          mypy app
+          bandit -c pyproject.toml -r app
+          pytest --cov=app --cov-report=term-missing
+      - name: Build source archive
+        env:
+          PULSEWATCH_TAG: ${{ github.ref_name }}
+          PULSEWATCH_COMMIT: ${{ github.sha }}
+        run: |
+          git archive --format=zip --prefix="pulsewatch-api-monitor-${PULSEWATCH_TAG}/" --output="pulsewatch-api-monitor-${PULSEWATCH_TAG}.zip" "${PULSEWATCH_COMMIT}"
+          sha256sum "pulsewatch-api-monitor-${PULSEWATCH_TAG}.zip" > "pulsewatch-api-monitor-${PULSEWATCH_TAG}.zip.sha256"
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULSEWATCH_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "${PULSEWATCH_TAG}" "pulsewatch-api-monitor-${PULSEWATCH_TAG}.zip" "pulsewatch-api-monitor-${PULSEWATCH_TAG}.zip.sha256" --generate-notes --verify-tag

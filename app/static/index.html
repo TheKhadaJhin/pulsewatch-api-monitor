@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="PulseWatch — asynchronous API reliability monitoring dashboard"
+      content="PulseWatch — scheduled API reliability and incident monitoring"
     />
-    <title>PulseWatch · API Reliability Monitor</title>
+    <title>PulseWatch · API Reliability Platform</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -23,11 +23,12 @@
         </span>
         <span>
           <strong>PulseWatch</strong>
-          <small>API reliability monitor</small>
+          <small>Reliability operations</small>
         </span>
       </a>
 
       <nav aria-label="Project links">
+        <button class="nav-button" id="auth-button" type="button">Admin key</button>
         <a href="/docs">OpenAPI Docs</a>
         <a href="https://github.com/TheKhadaJhin" target="_blank" rel="noreferrer">
           GitHub
@@ -38,12 +39,17 @@
     <main class="page-shell">
       <section class="hero">
         <div>
-          <p class="eyebrow"><span></span> Operations overview</p>
-          <h1>Know when your APIs<br /><em>stop behaving.</em></h1>
+          <p class="eyebrow"><span></span> Reliability control plane</p>
+          <h1>Detect failures.<br /><em>Track recovery.</em></h1>
           <p class="hero-copy">
-            Concurrent health checks, retry-aware incident detection and clear
-            reliability metrics in one lightweight service.
+            Scheduled health checks, incident transitions, signed webhooks and
+            auditable operations in one production-minded service.
           </p>
+          <div class="system-badges" aria-label="System configuration">
+            <span class="system-badge" id="scheduler-badge">Scheduler loading</span>
+            <span class="system-badge" id="webhook-badge">Webhook loading</span>
+            <span class="system-badge" id="auth-badge">Auth loading</span>
+          </div>
         </div>
 
         <div class="hero-controls">
@@ -56,7 +62,7 @@
           </select>
           <button class="button button-primary" id="run-all" type="button">
             <span class="button-dot"></span>
-            Run all checks
+            Run all now
           </button>
         </div>
       </section>
@@ -70,12 +76,12 @@
         <article class="metric-card accent-blue">
           <p>Average latency</p>
           <strong id="metric-latency">—</strong>
-          <span>Across successful responses</span>
+          <span>Across measured responses</span>
         </article>
         <article class="metric-card accent-red">
-          <p>Incidents</p>
+          <p>Open incidents</p>
           <strong id="metric-incidents">0</strong>
-          <span id="metric-incidents-note">Within selected window</span>
+          <span id="metric-incidents-note">No active failures</span>
         </article>
         <article class="metric-card accent-purple">
           <p>Active services</p>
@@ -87,12 +93,11 @@
       <section class="panel services-panel">
         <div class="panel-heading">
           <div>
-            <p class="section-label">Live status</p>
+            <p class="section-label">Scheduled monitoring</p>
             <h2>Monitored services</h2>
           </div>
-          <button class="icon-button" id="refresh" type="button" title="Refresh dashboard">
+          <button class="icon-button" id="refresh" type="button" aria-label="Refresh dashboard">
             <span aria-hidden="true">↻</span>
-            <span class="sr-only">Refresh dashboard</span>
           </button>
         </div>
 
@@ -103,8 +108,8 @@
                 <th>Service</th>
                 <th>Status</th>
                 <th>Last response</th>
-                <th>24h uptime</th>
-                <th>Last checked</th>
+                <th>Uptime</th>
+                <th>Next check</th>
                 <th><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
@@ -136,6 +141,15 @@
                 maxlength="80"
                 placeholder="Payments API"
                 required
+              />
+            </label>
+            <label>
+              Description
+              <input
+                name="description"
+                type="text"
+                maxlength="240"
+                placeholder="Production payment health endpoint"
               />
             </label>
             <label>
@@ -175,6 +189,22 @@
                 </select>
               </label>
             </div>
+            <div class="form-row">
+              <label>
+                Check every
+                <select name="check_interval_seconds">
+                  <option value="30">30 seconds</option>
+                  <option value="60">1 minute</option>
+                  <option value="300" selected>5 minutes</option>
+                  <option value="900">15 minutes</option>
+                  <option value="3600">1 hour</option>
+                </select>
+              </label>
+              <label>
+                Tags
+                <input name="tags" type="text" placeholder="production, payments" />
+              </label>
+            </div>
             <button class="button button-secondary" type="submit">Add service</button>
           </form>
         </article>
@@ -182,34 +212,107 @@
         <article class="panel history-panel">
           <div class="panel-heading compact">
             <div>
+              <p class="section-label">Incident lifecycle</p>
+              <h2>Recent incidents</h2>
+            </div>
+            <span class="live-indicator"><i></i> Transition aware</span>
+          </div>
+          <ol class="history-list" id="incident-list">
+            <li class="history-empty">No incidents recorded.</li>
+          </ol>
+        </article>
+      </section>
+
+      <section class="lower-grid operations-grid">
+        <article class="panel history-panel">
+          <div class="panel-heading compact">
+            <div>
               <p class="section-label">Audit trail</p>
               <h2>Recent checks</h2>
             </div>
-            <span class="live-indicator"><i></i> Live data</span>
+            <span class="live-indicator"><i></i> Persisted</span>
           </div>
           <ol class="history-list" id="history-list">
             <li class="history-empty">No check history yet.</li>
           </ol>
+        </article>
+
+        <article class="panel operations-panel">
+          <div class="panel-heading compact">
+            <div>
+              <p class="section-label">Administration</p>
+              <h2>Operations</h2>
+            </div>
+          </div>
+          <div class="operations-content">
+            <div class="operation-row">
+              <div>
+                <strong>Background scheduler</strong>
+                <span id="scheduler-detail">Waiting for status…</span>
+              </div>
+              <button class="button button-compact" id="run-scheduler" type="button">
+                Run due
+              </button>
+            </div>
+            <div class="operation-row">
+              <div>
+                <strong>History retention</strong>
+                <span id="retention-detail">Automatic cleanup configured</span>
+              </div>
+              <button class="button button-compact" id="run-retention" type="button">
+                Clean now
+              </button>
+            </div>
+            <div class="operation-row">
+              <div>
+                <strong>Operational metrics</strong>
+                <span>Prometheus exposition format</span>
+              </div>
+              <a class="button button-compact" href="/metrics">View metrics</a>
+            </div>
+          </div>
         </article>
       </section>
 
       <section class="engineering-note">
         <span aria-hidden="true">{ }</span>
         <div>
-          <strong>Built for observable, testable backend behavior</strong>
+          <strong>Production-minded backend engineering</strong>
           <p>
-            Async HTTP · bounded concurrency · exponential backoff · SQLite audit trail ·
-            OpenAPI · SSRF safeguards · automated tests
+            Async HTTP · PostgreSQL/SQLite · scheduled checks · incident transitions ·
+            signed webhooks · API-key auth · audit log · Prometheus · migrations
           </p>
         </div>
-        <a href="/docs">Explore the API →</a>
+        <a href="/docs">Explore API v2 →</a>
       </section>
     </main>
 
     <footer>
-      <span>PulseWatch v1.0</span>
+      <span>PulseWatch v2.0</span>
       <span>Designed and engineered by Mario Fuentes</span>
     </footer>
+
+    <dialog id="auth-dialog">
+      <form method="dialog" id="auth-form" class="dialog-form">
+        <div>
+          <p class="section-label">Administrative access</p>
+          <h2>Set API key</h2>
+          <p class="dialog-copy">
+            The key stays in this browser tab and is only sent to PulseWatch.
+          </p>
+        </div>
+        <label>
+          Admin API key
+          <input id="api-key-input" type="password" autocomplete="off" />
+        </label>
+        <div class="dialog-actions">
+          <button class="button button-ghost" value="cancel" type="submit">Cancel</button>
+          <button class="button button-secondary" id="save-api-key" value="default" type="submit">
+            Save key
+          </button>
+        </div>
+      </form>
+    </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <script src="/app.js" defer></script>

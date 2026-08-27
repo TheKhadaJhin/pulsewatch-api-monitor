@@ -1,72 +1,86 @@
-"""SQLite connection management and schema creation."""
+"""Asynchronous SQLAlchemy engine and session lifecycle."""
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
-import aiosqlite
+from sqlalchemy import event, inspect, text
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS services (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    url TEXT NOT NULL UNIQUE,
-    method TEXT NOT NULL CHECK (method IN ('GET', 'HEAD')),
-    expected_status INTEGER NOT NULL CHECK (expected_status BETWEEN 100 AND 599),
-    timeout_seconds REAL NOT NULL CHECK (timeout_seconds > 0),
-    retry_count INTEGER NOT NULL DEFAULT 2 CHECK (retry_count BETWEEN 0 AND 3),
-    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
+from app.db_models import Base
 
-CREATE TABLE IF NOT EXISTS check_results (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    service_id INTEGER NOT NULL,
-    checked_at TEXT NOT NULL,
-    status_code INTEGER,
-    latency_ms REAL,
-    is_healthy INTEGER NOT NULL CHECK (is_healthy IN (0, 1)),
-    attempts INTEGER NOT NULL CHECK (attempts >= 1),
-    error_type TEXT,
-    error_message TEXT,
-    FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE
-);
 
-CREATE INDEX IF NOT EXISTS idx_check_results_service_time
-ON check_results(service_id, checked_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_check_results_checked_at
-ON check_results(checked_at DESC);
-"""
+def _prepare_sqlite_directory(database_url: str) -> None:
+    prefix = "sqlite+aiosqlite:///"
+    if not database_url.startswith(prefix):
+        return
+    raw_path = database_url.removeprefix(prefix)
+    if raw_path == ":memory:" or raw_path.startswith("file:"):
+        return
+    Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
 
 
 class Database:
-    def __init__(self, path: Path) -> None:
-        self.path = path
+    def __init__(self, database_url: str) -> None:
+        self.url = database_url
+        _prepare_sqlite_directory(database_url)
+        engine_options: dict[str, object] = {"pool_pre_ping": True}
+        if database_url.startswith("sqlite+"):
+            engine_options["connect_args"] = {"timeout": 5}
+
+        self.engine: AsyncEngine = create_async_engine(database_url, **engine_options)
+        self.sessions = async_sessionmaker(
+            self.engine, class_=AsyncSession, expire_on_commit=False
+        )
+
+        if database_url.startswith("sqlite+"):
+
+            @event.listens_for(self.engine.sync_engine, "connect")
+            def configure_sqlite(
+                dbapi_connection: Any, _connection_record: Any
+            ) -> None:
+                cursor = dbapi_connection.cursor()
+                cursor.execute("PRAGMA foreign_keys = ON")
+                cursor.execute("PRAGMA journal_mode = WAL")
+                cursor.execute("PRAGMA busy_timeout = 5000")
+                cursor.close()
 
     @asynccontextmanager
-    async def connect(self) -> AsyncIterator[aiosqlite.Connection]:
-        connection = await aiosqlite.connect(self.path)
-        connection.row_factory = aiosqlite.Row
-        await connection.execute("PRAGMA foreign_keys = ON")
-        await connection.execute("PRAGMA busy_timeout = 5000")
-        try:
-            yield connection
-        finally:
-            await connection.close()
+    async def session(self) -> AsyncIterator[AsyncSession]:
+        async with self.sessions() as session:
+            yield session
 
     async def initialize(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        async with self.connect() as connection:
-            await connection.execute("PRAGMA journal_mode = WAL")
-            await connection.executescript(SCHEMA)
-            await connection.commit()
+        async with self.engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+
+    async def drop_all(self) -> None:
+        async with self.engine.begin() as connection:
+            await connection.run_sync(Base.metadata.drop_all)
 
     async def ping(self) -> bool:
-        async with self.connect() as connection:
-            cursor = await connection.execute("SELECT 1")
-            row = await cursor.fetchone()
-        return bool(row and row[0] == 1)
+        async with self.session() as session:
+            result = await session.execute(text("SELECT 1"))
+            return result.scalar_one() == 1
+
+    async def schema_ready(self) -> bool:
+        required_tables = set(Base.metadata.tables)
+
+        def has_required_tables(connection: Connection) -> bool:
+            available_tables = set(inspect(connection).get_table_names())
+            return required_tables.issubset(available_tables)
+
+        async with self.engine.connect() as connection:
+            return await connection.run_sync(has_required_tables)
+
+    async def dispose(self) -> None:
+        await self.engine.dispose()
