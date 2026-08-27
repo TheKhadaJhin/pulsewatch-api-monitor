@@ -1,0 +1,49 @@
+@baseUrl = http://127.0.0.1:8000
+
+### Application health
+GET {{baseUrl}}/api/health
+
+### Add a monitored API
+POST {{baseUrl}}/api/services
+Content-Type: application/json
+
+{
+  "name": "GitHub API",
+  "url": "https://api.github.com",
+  "method": "GET",
+  "expected_status": 200,
+  "timeout_seconds": 5,
+  "retry_count": 2
+}
+
+### List monitored services
+GET {{baseUrl}}/api/services
+
+### Run every active check
+POST {{baseUrl}}/api/checks/run
+Content-Type: application/json
+
+{}
+
+### Run one check
+POST {{baseUrl}}/api/checks/run
+Content-Type: application/json
+
+{
+  "service_ids": [1],
+  "concurrency": 1
+}
+
+### View recent results
+GET {{baseUrl}}/api/checks?limit=25
+
+### View seven-day reliability metrics
+GET {{baseUrl}}/api/summary?window_hours=168
+
+### Disable a service without deleting its history
+PATCH {{baseUrl}}/api/services/1
+Content-Type: application/json
+
+{
+  "active": false
+}
