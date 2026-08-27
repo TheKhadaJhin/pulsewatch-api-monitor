@@ -57,6 +57,11 @@ a {
   text-decoration: none;
 }
 
+:where(a, button, input, select):focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 3px;
+}
+
 .ambient {
   position: fixed;
   z-index: -1;
@@ -147,8 +152,19 @@ a {
   transition: color 160ms ease;
 }
 
-.topbar nav a:hover {
+.topbar nav a:hover,
+.nav-button:hover {
   color: var(--green);
+}
+
+.nav-button {
+  padding: 0;
+  border: 0;
+  cursor: pointer;
+  color: inherit;
+  background: transparent;
+  font-size: inherit;
+  font-weight: inherit;
 }
 
 .page-shell {
@@ -211,6 +227,23 @@ a {
   color: var(--muted-light);
   font-size: 1rem;
   line-height: 1.7;
+}
+
+.system-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.system-badge {
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.025);
+  font-size: 0.64rem;
+  font-weight: 650;
 }
 
 .hero-controls {
@@ -509,6 +542,11 @@ tr:last-child td {
   background: rgba(143, 153, 173, 0.08);
 }
 
+.status-paused {
+  color: var(--blue);
+  background: rgba(86, 184, 255, 0.08);
+}
+
 .row-actions {
   display: flex;
   justify-content: flex-end;
@@ -672,6 +710,102 @@ form label {
   font-weight: 700;
 }
 
+.operations-grid {
+  margin-top: 18px;
+}
+
+.operations-content {
+  display: grid;
+}
+
+.operation-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-height: 92px;
+  padding: 18px 24px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.operation-row:last-child {
+  border-bottom: 0;
+}
+
+.operation-row strong,
+.operation-row span {
+  display: block;
+}
+
+.operation-row strong {
+  margin-bottom: 6px;
+  font-size: 0.76rem;
+}
+
+.operation-row span {
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+
+.button-compact {
+  flex: 0 0 auto;
+  min-height: 35px;
+  padding: 0 13px;
+  border: 1px solid var(--border-strong);
+  color: var(--muted-light);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.button-ghost {
+  padding: 0 18px;
+  border: 1px solid var(--border-strong);
+  color: var(--muted-light);
+  background: transparent;
+}
+
+dialog {
+  width: min(430px, calc(100% - 32px));
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--text);
+  background: var(--surface-solid);
+  box-shadow: var(--shadow);
+}
+
+dialog::backdrop {
+  background: rgba(2, 4, 9, 0.76);
+  backdrop-filter: blur(5px);
+}
+
+.dialog-form {
+  gap: 20px;
+  padding: 26px;
+}
+
+.dialog-form h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.dialog-copy {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.55;
+}
+
+.dialog-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.dialog-actions .button {
+  width: 100%;
+  margin: 0;
+}
+
 footer {
   display: flex;
   justify-content: space-between;
@@ -770,6 +904,10 @@ footer {
     display: none;
   }
 
+  .topbar nav {
+    gap: 15px;
+  }
+
   .page-shell {
     padding-top: 48px;
   }
@@ -794,6 +932,15 @@ footer {
 
   .engineering-note {
     grid-template-columns: auto 1fr;
+  }
+
+  .operation-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .operation-row .button {
+    width: 100%;
   }
 
   .engineering-note a {

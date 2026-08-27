@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose a measurable improvement
+title: "feat: "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Operator or user problem
+      description: Describe the need without prescribing implementation first.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: What observable behavior would solve the problem?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: Include API, data model, or deployment impact when known.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and tradeoffs
+      description: What simpler or different approaches were considered?
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: Impact areas
+      options:
+        - label: API contract
+        - label: Database migration
+        - label: Security boundary
+        - label: Deployment topology
+        - label: Dashboard
+        - label: Documentation only

@@ -1,14 +1,69 @@
 services:
-  pulsewatch:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pulsewatch
+      POSTGRES_USER: pulsewatch
+      POSTGRES_PASSWORD: ${PULSEWATCH_POSTGRES_PASSWORD:-pulsewatch-local}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulsewatch -d pulsewatch"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
     build: .
+    init: true
+    read_only: true
     ports:
       - "8000:8000"
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
-      PULSEWATCH_DATABASE_PATH: /app/data/pulsewatch.db
-      PULSEWATCH_CHECK_CONCURRENCY: 5
-    volumes:
-      - pulsewatch-data:/app/data
+      PULSEWATCH_ENVIRONMENT: production
+      PULSEWATCH_DATABASE_URL: postgresql+asyncpg://pulsewatch:${PULSEWATCH_POSTGRES_PASSWORD:-pulsewatch-local}@postgres:5432/pulsewatch
+      PULSEWATCH_AUTO_CREATE_SCHEMA: "false"
+      PULSEWATCH_SCHEDULER_ENABLED: "false"
+      PULSEWATCH_ADMIN_API_KEY: ${PULSEWATCH_ADMIN_API_KEY:?Set PULSEWATCH_ADMIN_API_KEY in .env}
+      PULSEWATCH_WEBHOOK_URL: ${PULSEWATCH_WEBHOOK_URL:-}
+      PULSEWATCH_WEBHOOK_SECRET: ${PULSEWATCH_WEBHOOK_SECRET:-}
+      PULSEWATCH_LOG_JSON: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    init: true
+    read_only: true
+    command: ["pulsewatch", "worker"]
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      PULSEWATCH_ENVIRONMENT: production
+      PULSEWATCH_DATABASE_URL: postgresql+asyncpg://pulsewatch:${PULSEWATCH_POSTGRES_PASSWORD:-pulsewatch-local}@postgres:5432/pulsewatch
+      PULSEWATCH_AUTO_CREATE_SCHEMA: "false"
+      PULSEWATCH_SCHEDULER_ENABLED: "true"
+      PULSEWATCH_ADMIN_API_KEY: ${PULSEWATCH_ADMIN_API_KEY:?Set PULSEWATCH_ADMIN_API_KEY in .env}
+      PULSEWATCH_WEBHOOK_URL: ${PULSEWATCH_WEBHOOK_URL:-}
+      PULSEWATCH_WEBHOOK_SECRET: ${PULSEWATCH_WEBHOOK_SECRET:-}
+      PULSEWATCH_LOG_JSON: "true"
+    depends_on:
+      api:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  pulsewatch-data:
+  postgres-data:

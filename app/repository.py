@@ -1,16 +1,33 @@
-"""Persistence layer for monitored services and check results."""
+"""Database repository, incident lifecycle, auditing, and metrics queries."""
 
 from __future__ import annotations
 
-import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import aiosqlite
+from sqlalchemy import case, delete, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import Database
+from app.db_models import (
+    AuditEventRow,
+    CheckResultRow,
+    IncidentRow,
+    NotificationDeliveryRow,
+    SchedulerStateRow,
+    ServiceRow,
+    utc_now,
+)
 from app.models import (
+    AuditEventOut,
     CheckResultOut,
+    CheckTrigger,
+    IncidentEventType,
+    IncidentOut,
+    IncidentTransition,
+    NotificationDeliveryOut,
+    SchedulerStatusOut,
     ServiceCreate,
     ServiceMetric,
     ServiceOut,
@@ -19,240 +36,586 @@ from app.models import (
 )
 
 
-def utc_now() -> datetime:
-    return datetime.now(UTC)
+def _aware(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
-def _service_from_row(row: aiosqlite.Row) -> ServiceOut:
-    data = dict(row)
-    data["active"] = bool(data["active"])
-    return ServiceOut.model_validate(data)
+def _service_out(row: ServiceRow) -> ServiceOut:
+    return ServiceOut(
+        id=row.id,
+        name=row.name,
+        description=row.description,
+        url=row.url,
+        method=row.method,  # type: ignore[arg-type]
+        expected_status=row.expected_status,
+        timeout_seconds=row.timeout_seconds,
+        retry_count=row.retry_count,
+        check_interval_seconds=row.check_interval_seconds,
+        active=row.active,
+        tags=list(row.tags or []),
+        next_check_at=_aware(row.next_check_at),
+        created_at=_aware(row.created_at),
+        updated_at=_aware(row.updated_at),
+    )
 
 
-def _result_from_row(row: aiosqlite.Row) -> CheckResultOut:
-    data = dict(row)
-    data["is_healthy"] = bool(data["is_healthy"])
-    return CheckResultOut.model_validate(data)
+def _check_result_out(row: CheckResultRow) -> CheckResultOut:
+    return CheckResultOut(
+        id=row.id,
+        service_id=row.service_id,
+        checked_at=_aware(row.checked_at),
+        status_code=row.status_code,
+        latency_ms=row.latency_ms,
+        is_healthy=row.is_healthy,
+        attempts=row.attempts,
+        trigger=row.trigger,  # type: ignore[arg-type]
+        error_type=row.error_type,
+        error_message=row.error_message,
+        request_id=row.request_id,
+    )
+
+
+def _incident_out(row: IncidentRow, service_name: str) -> IncidentOut:
+    opened_at = _aware(row.opened_at)
+    resolved_at = _aware(row.resolved_at) if row.resolved_at else None
+    return IncidentOut(
+        id=row.id,
+        service_id=row.service_id,
+        service_name=service_name,
+        status=row.status,  # type: ignore[arg-type]
+        opened_at=opened_at,
+        resolved_at=resolved_at,
+        last_failure_at=_aware(row.last_failure_at),
+        duration_seconds=(
+            round((resolved_at - opened_at).total_seconds(), 2) if resolved_at else None
+        ),
+        failure_count=row.failure_count,
+        initial_error_type=row.initial_error_type,
+        initial_error_message=row.initial_error_message,
+        last_error_type=row.last_error_type,
+        last_error_message=row.last_error_message,
+    )
+
+
+def _notification_out(row: NotificationDeliveryRow) -> NotificationDeliveryOut:
+    return NotificationDeliveryOut(
+        id=row.id,
+        incident_id=row.incident_id,
+        event_type=row.event_type,  # type: ignore[arg-type]
+        attempted_at=_aware(row.attempted_at),
+        delivered=row.delivered,
+        status_code=row.status_code,
+        attempts=row.attempts,
+        error_message=row.error_message,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedCheck:
+    result: CheckResultOut
+    transition: IncidentTransition | None
 
 
 class Repository:
     def __init__(self, database: Database) -> None:
         self.database = database
-        self._write_lock = asyncio.Lock()
 
-    async def create_service(self, payload: ServiceCreate) -> ServiceOut:
-        now = utc_now().isoformat()
-        values = payload.model_dump()
-        async with self._write_lock, self.database.connect() as connection:
-            cursor = await connection.execute(
-                """
-                INSERT INTO services (
-                    name, url, method, expected_status, timeout_seconds,
-                    retry_count, active, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    values["name"],
-                    values["url"],
-                    values["method"],
-                    values["expected_status"],
-                    values["timeout_seconds"],
-                    values["retry_count"],
-                    int(values["active"]),
-                    now,
-                    now,
-                ),
+    async def _audit(
+        self,
+        session: AsyncSession,
+        *,
+        action: str,
+        entity_type: str,
+        entity_id: str | None,
+        actor: str,
+        request_id: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        session.add(
+            AuditEventRow(
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                actor=actor,
+                request_id=request_id,
+                event_metadata=metadata or {},
             )
-            await connection.commit()
-            service_id = cursor.lastrowid
+        )
 
-        service = await self.get_service(int(service_id))
-        if service is None:  # pragma: no cover - defensive database guard
-            raise RuntimeError("Created service could not be loaded")
-        return service
+    async def create_service(
+        self,
+        payload: ServiceCreate,
+        *,
+        actor: str = "api",
+        request_id: str | None = None,
+    ) -> ServiceOut:
+        values = payload.model_dump()
+        row = ServiceRow(**values, next_check_at=utc_now())
+        async with self.database.session() as session, session.begin():
+            session.add(row)
+            await session.flush()
+            await self._audit(
+                session,
+                action="service.created",
+                entity_type="service",
+                entity_id=str(row.id),
+                actor=actor,
+                request_id=request_id,
+                metadata={"name": row.name, "url": row.url},
+            )
+        return _service_out(row)
 
     async def list_services(
         self,
         *,
         active_only: bool = False,
         service_ids: list[int] | None = None,
+        due_before: datetime | None = None,
+        limit: int = 500,
+        offset: int = 0,
     ) -> list[ServiceOut]:
-        clauses: list[str] = []
-        parameters: list[Any] = []
-
+        statement = select(ServiceRow)
         if active_only:
-            clauses.append("active = 1")
+            statement = statement.where(ServiceRow.active.is_(True))
         if service_ids is not None:
             if not service_ids:
                 return []
-            placeholders = ", ".join("?" for _ in service_ids)
-            clauses.append(f"id IN ({placeholders})")
-            parameters.extend(service_ids)
-
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        query = f"SELECT * FROM services{where} ORDER BY name COLLATE NOCASE, id"
-        async with self.database.connect() as connection:
-            cursor = await connection.execute(query, parameters)
-            rows = await cursor.fetchall()
-        return [_service_from_row(row) for row in rows]
+            statement = statement.where(ServiceRow.id.in_(service_ids))
+        if due_before is not None:
+            statement = statement.where(ServiceRow.next_check_at <= due_before)
+        statement = (
+            statement.order_by(func.lower(ServiceRow.name), ServiceRow.id)
+            .limit(limit)
+            .offset(offset)
+        )
+        async with self.database.session() as session:
+            rows = (await session.scalars(statement)).all()
+        return [_service_out(row) for row in rows]
 
     async def get_service(self, service_id: int) -> ServiceOut | None:
-        async with self.database.connect() as connection:
-            cursor = await connection.execute(
-                "SELECT * FROM services WHERE id = ?", (service_id,)
-            )
-            row = await cursor.fetchone()
-        return None if row is None else _service_from_row(row)
+        async with self.database.session() as session:
+            row = await session.get(ServiceRow, service_id)
+        return None if row is None else _service_out(row)
 
     async def update_service(
-        self, service_id: int, payload: ServiceUpdate
+        self,
+        service_id: int,
+        payload: ServiceUpdate,
+        *,
+        actor: str = "api",
+        request_id: str | None = None,
     ) -> ServiceOut | None:
         values = payload.model_dump(exclude_unset=True)
-        if "active" in values:
-            values["active"] = int(values["active"])
-        values["updated_at"] = utc_now().isoformat()
-
-        assignments = ", ".join(f"{column} = ?" for column in values)
-        parameters = [*values.values(), service_id]
-        async with self._write_lock, self.database.connect() as connection:
-            cursor = await connection.execute(
-                f"UPDATE services SET {assignments} WHERE id = ?", parameters
-            )
-            await connection.commit()
-            if cursor.rowcount == 0:
+        async with self.database.session() as session, session.begin():
+            row = await session.get(ServiceRow, service_id)
+            if row is None:
                 return None
-        return await self.get_service(service_id)
-
-    async def delete_service(self, service_id: int) -> bool:
-        async with self._write_lock, self.database.connect() as connection:
-            cursor = await connection.execute(
-                "DELETE FROM services WHERE id = ?", (service_id,)
+            for field, value in values.items():
+                setattr(row, field, value)
+            row.updated_at = utc_now()
+            if values.get("active") is True or "check_interval_seconds" in values:
+                row.next_check_at = utc_now()
+            await self._audit(
+                session,
+                action="service.updated",
+                entity_type="service",
+                entity_id=str(service_id),
+                actor=actor,
+                request_id=request_id,
+                metadata={"changed_fields": sorted(values)},
             )
-            await connection.commit()
-        return cursor.rowcount > 0
+        return _service_out(row)
 
-    async def add_check_result(
+    async def delete_service(
+        self,
+        service_id: int,
+        *,
+        actor: str = "api",
+        request_id: str | None = None,
+    ) -> bool:
+        async with self.database.session() as session, session.begin():
+            row = await session.get(ServiceRow, service_id)
+            if row is None:
+                return False
+            name = row.name
+            await session.delete(row)
+            await self._audit(
+                session,
+                action="service.deleted",
+                entity_type="service",
+                entity_id=str(service_id),
+                actor=actor,
+                request_id=request_id,
+                metadata={"name": name},
+            )
+        return True
+
+    async def record_check_result(
         self,
         *,
-        service_id: int,
+        service: ServiceOut,
         status_code: int | None,
         latency_ms: float | None,
         is_healthy: bool,
         attempts: int,
+        trigger: CheckTrigger,
         error_type: str | None = None,
         error_message: str | None = None,
-    ) -> CheckResultOut:
-        checked_at = utc_now().isoformat()
-        async with self._write_lock, self.database.connect() as connection:
-            cursor = await connection.execute(
-                """
-                INSERT INTO check_results (
-                    service_id, checked_at, status_code, latency_ms,
-                    is_healthy, attempts, error_type, error_message
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    service_id,
-                    checked_at,
-                    status_code,
-                    latency_ms,
-                    int(is_healthy),
-                    attempts,
-                    error_type,
-                    error_message,
-                ),
-            )
-            await connection.commit()
-            result_id = cursor.lastrowid
+        request_id: str | None = None,
+    ) -> RecordedCheck:
+        now = utc_now()
+        result_row = CheckResultRow(
+            service_id=service.id,
+            checked_at=now,
+            status_code=status_code,
+            latency_ms=latency_ms,
+            is_healthy=is_healthy,
+            attempts=attempts,
+            trigger=trigger,
+            error_type=error_type,
+            error_message=error_message,
+            request_id=request_id,
+        )
+        transition: IncidentTransition | None = None
 
-            result_cursor = await connection.execute(
-                "SELECT * FROM check_results WHERE id = ?", (result_id,)
+        async with self.database.session() as session, session.begin():
+            # Lock the parent first so concurrent API/worker checks for one service
+            # cannot both observe that no incident exists and open duplicates.
+            service_row = await session.scalar(
+                select(ServiceRow).where(ServiceRow.id == service.id).with_for_update()
             )
-            row = await result_cursor.fetchone()
+            if service_row is None:
+                raise LookupError(
+                    f"Service {service.id} was deleted before its check was recorded"
+                )
+            session.add(result_row)
+            await session.flush()
+            open_statement = (
+                select(IncidentRow)
+                .where(
+                    IncidentRow.service_id == service.id,
+                    IncidentRow.status == "open",
+                )
+                .order_by(IncidentRow.id.desc())
+                .limit(1)
+                .with_for_update()
+            )
+            incident = (await session.scalars(open_statement)).first()
 
-        if row is None:  # pragma: no cover - defensive database guard
-            raise RuntimeError("Created check result could not be loaded")
-        return _result_from_row(row)
+            if not is_healthy:
+                if incident is None:
+                    incident = IncidentRow(
+                        service_id=service.id,
+                        status="open",
+                        opened_at=now,
+                        last_failure_at=now,
+                        failure_count=1,
+                        initial_error_type=error_type,
+                        initial_error_message=error_message,
+                        last_error_type=error_type,
+                        last_error_message=error_message,
+                    )
+                    session.add(incident)
+                    await session.flush()
+                    transition = IncidentTransition(
+                        event_type="incident_opened",
+                        incident=_incident_out(incident, service.name),
+                        service=service,
+                    )
+                else:
+                    incident.failure_count += 1
+                    incident.last_failure_at = now
+                    incident.last_error_type = error_type
+                    incident.last_error_message = error_message
+            elif incident is not None:
+                incident.status = "resolved"
+                incident.resolved_at = now
+                await session.flush()
+                transition = IncidentTransition(
+                    event_type="incident_resolved",
+                    incident=_incident_out(incident, service.name),
+                    service=service,
+                )
+
+            service_row.next_check_at = now + timedelta(
+                seconds=service_row.check_interval_seconds
+            )
+
+        return RecordedCheck(
+            result=_check_result_out(result_row),
+            transition=transition,
+        )
 
     async def list_check_results(
-        self, *, service_id: int | None = None, limit: int = 50
+        self,
+        *,
+        service_id: int | None = None,
+        trigger: CheckTrigger | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[CheckResultOut]:
-        if service_id is None:
-            query = (
-                "SELECT * FROM check_results ORDER BY checked_at DESC, id DESC LIMIT ?"
+        statement = select(CheckResultRow)
+        if service_id is not None:
+            statement = statement.where(CheckResultRow.service_id == service_id)
+        if trigger is not None:
+            statement = statement.where(CheckResultRow.trigger == trigger)
+        statement = (
+            statement.order_by(
+                CheckResultRow.checked_at.desc(), CheckResultRow.id.desc()
             )
-            parameters: tuple[Any, ...] = (limit,)
-        else:
-            query = """
-                SELECT * FROM check_results
-                WHERE service_id = ?
-                ORDER BY checked_at DESC, id DESC
-                LIMIT ?
-            """
-            parameters = (service_id, limit)
+            .limit(limit)
+            .offset(offset)
+        )
+        async with self.database.session() as session:
+            rows = (await session.scalars(statement)).all()
+        return [_check_result_out(row) for row in rows]
 
-        async with self.database.connect() as connection:
-            cursor = await connection.execute(query, parameters)
-            rows = await cursor.fetchall()
-        return [_result_from_row(row) for row in rows]
+    async def list_incidents(
+        self,
+        *,
+        status: str | None = None,
+        service_id: int | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[IncidentOut]:
+        statement = select(IncidentRow, ServiceRow.name).join(ServiceRow)
+        if status is not None:
+            statement = statement.where(IncidentRow.status == status)
+        if service_id is not None:
+            statement = statement.where(IncidentRow.service_id == service_id)
+        statement = (
+            statement.order_by(IncidentRow.opened_at.desc(), IncidentRow.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        async with self.database.session() as session:
+            rows = (await session.execute(statement)).all()
+        return [_incident_out(incident, name) for incident, name in rows]
+
+    async def record_notification_delivery(
+        self,
+        *,
+        incident_id: int,
+        event_type: IncidentEventType,
+        delivered: bool,
+        status_code: int | None,
+        attempts: int,
+        error_message: str | None,
+    ) -> NotificationDeliveryOut:
+        row = NotificationDeliveryRow(
+            incident_id=incident_id,
+            event_type=event_type,
+            delivered=delivered,
+            status_code=status_code,
+            attempts=attempts,
+            error_message=error_message,
+        )
+        async with self.database.session() as session, session.begin():
+            session.add(row)
+            await session.flush()
+        return _notification_out(row)
+
+    async def list_notification_deliveries(
+        self, *, limit: int = 100, offset: int = 0
+    ) -> list[NotificationDeliveryOut]:
+        statement = (
+            select(NotificationDeliveryRow)
+            .order_by(
+                NotificationDeliveryRow.attempted_at.desc(),
+                NotificationDeliveryRow.id.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        async with self.database.session() as session:
+            rows = (await session.scalars(statement)).all()
+        return [_notification_out(row) for row in rows]
+
+    async def save_scheduler_status(self, status: SchedulerStatusOut) -> None:
+        values = status.model_dump()
+        async with self.database.session() as session, session.begin():
+            row = await session.get(SchedulerStateRow, 1)
+            if row is None:
+                row = SchedulerStateRow(id=1, **values)
+                session.add(row)
+            else:
+                for field, value in values.items():
+                    setattr(row, field, value)
+                row.updated_at = utc_now()
+
+    async def get_scheduler_status(self) -> SchedulerStatusOut | None:
+        async with self.database.session() as session:
+            row = await session.get(SchedulerStateRow, 1)
+        if row is None:
+            return None
+
+        heartbeat = _aware(row.heartbeat_at) if row.heartbeat_at else None
+        stale_after_seconds = max(5.0, row.poll_seconds * 3)
+        running = row.running
+        last_error = row.last_error
+        if heartbeat is None:
+            running = False
+        elif running and heartbeat < utc_now() - timedelta(seconds=stale_after_seconds):
+            running = False
+            last_error = last_error or "Scheduler heartbeat is stale"
+
+        return SchedulerStatusOut(
+            enabled=row.enabled,
+            running=running,
+            cycle_in_progress=row.cycle_in_progress if running else False,
+            poll_seconds=row.poll_seconds,
+            heartbeat_at=heartbeat,
+            last_cycle_started_at=(
+                _aware(row.last_cycle_started_at) if row.last_cycle_started_at else None
+            ),
+            last_cycle_finished_at=(
+                _aware(row.last_cycle_finished_at)
+                if row.last_cycle_finished_at
+                else None
+            ),
+            last_error=last_error,
+            checks_executed=row.checks_executed,
+            retention_last_run_at=(
+                _aware(row.retention_last_run_at) if row.retention_last_run_at else None
+            ),
+        )
+
+    async def record_audit_event(
+        self,
+        *,
+        action: str,
+        entity_type: str,
+        entity_id: str | None,
+        actor: str,
+        request_id: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        async with self.database.session() as session, session.begin():
+            await self._audit(
+                session,
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                actor=actor,
+                request_id=request_id,
+                metadata=metadata,
+            )
+
+    async def list_audit_events(
+        self, *, limit: int = 100, offset: int = 0
+    ) -> list[AuditEventOut]:
+        statement = (
+            select(AuditEventRow)
+            .order_by(AuditEventRow.occurred_at.desc(), AuditEventRow.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        async with self.database.session() as session:
+            rows = (await session.scalars(statement)).all()
+        return [
+            AuditEventOut(
+                id=row.id,
+                occurred_at=_aware(row.occurred_at),
+                action=row.action,
+                entity_type=row.entity_type,
+                entity_id=row.entity_id,
+                actor=row.actor,
+                request_id=row.request_id,
+                metadata=dict(row.event_metadata or {}),
+            )
+            for row in rows
+        ]
+
+    async def purge_history(self, *, before: datetime) -> int:
+        async with self.database.session() as session, session.begin():
+            result = await session.execute(
+                delete(CheckResultRow).where(CheckResultRow.checked_at < before)
+            )
+        return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
     async def build_summary(
         self, *, window_hours: int, degraded_latency_ms: float
     ) -> SummaryOut:
-        cutoff = (utc_now() - timedelta(hours=window_hours)).isoformat()
-        query = """
-        WITH recent AS (
-            SELECT * FROM check_results WHERE checked_at >= ?
-        ),
-        stats AS (
-            SELECT
-                service_id,
-                COUNT(*) AS checks,
-                SUM(is_healthy) AS healthy_checks,
-                SUM(CASE WHEN is_healthy = 0 THEN 1 ELSE 0 END) AS incidents,
-                AVG(latency_ms) AS average_latency_ms
-            FROM recent
-            GROUP BY service_id
-        ),
-        latest_ranked AS (
-            SELECT
-                check_results.*,
-                ROW_NUMBER() OVER (
-                    PARTITION BY service_id
-                    ORDER BY checked_at DESC, id DESC
-                ) AS row_number
-            FROM check_results
+        cutoff = utc_now() - timedelta(hours=window_hours)
+        recent = (
+            select(
+                CheckResultRow.service_id,
+                CheckResultRow.is_healthy,
+                CheckResultRow.latency_ms,
+            )
+            .where(CheckResultRow.checked_at >= cutoff)
+            .subquery()
         )
-        SELECT
-            services.id,
-            services.name,
-            services.url,
-            COALESCE(stats.checks, 0) AS checks,
-            COALESCE(stats.healthy_checks, 0) AS healthy_checks,
-            COALESCE(stats.incidents, 0) AS incidents,
-            stats.average_latency_ms,
-            latest_ranked.checked_at AS last_checked_at,
-            latest_ranked.status_code AS last_status_code,
-            latest_ranked.latency_ms AS last_latency_ms,
-            latest_ranked.is_healthy AS last_is_healthy
-        FROM services
-        LEFT JOIN stats ON stats.service_id = services.id
-        LEFT JOIN latest_ranked
-            ON latest_ranked.service_id = services.id
-            AND latest_ranked.row_number = 1
-        WHERE services.active = 1
-        ORDER BY services.name COLLATE NOCASE, services.id
-        """
+        stats = (
+            select(
+                recent.c.service_id.label("service_id"),
+                func.count().label("checks"),
+                func.sum(case((recent.c.is_healthy.is_(True), 1), else_=0)).label(
+                    "healthy_checks"
+                ),
+                func.avg(recent.c.latency_ms).label("average_latency_ms"),
+                func.count(recent.c.latency_ms).label("latency_count"),
+            )
+            .group_by(recent.c.service_id)
+            .subquery()
+        )
+        ranked = select(
+            CheckResultRow.service_id,
+            CheckResultRow.checked_at,
+            CheckResultRow.status_code,
+            CheckResultRow.latency_ms,
+            CheckResultRow.is_healthy,
+            func.row_number()
+            .over(
+                partition_by=CheckResultRow.service_id,
+                order_by=(
+                    CheckResultRow.checked_at.desc(),
+                    CheckResultRow.id.desc(),
+                ),
+            )
+            .label("row_number"),
+        ).subquery()
+        latest = select(ranked).where(ranked.c.row_number == 1).subquery()
+        statement = (
+            select(
+                ServiceRow,
+                stats.c.checks,
+                stats.c.healthy_checks,
+                stats.c.average_latency_ms,
+                stats.c.latency_count,
+                latest.c.checked_at.label("last_checked_at"),
+                latest.c.status_code.label("last_status_code"),
+                latest.c.latency_ms.label("last_latency_ms"),
+                latest.c.is_healthy.label("last_is_healthy"),
+            )
+            .outerjoin(stats, stats.c.service_id == ServiceRow.id)
+            .outerjoin(latest, latest.c.service_id == ServiceRow.id)
+            .where(ServiceRow.active.is_(True))
+            .order_by(func.lower(ServiceRow.name), ServiceRow.id)
+        )
 
-        async with self.database.connect() as connection:
-            cursor = await connection.execute(query, (cutoff,))
-            rows = await cursor.fetchall()
+        async with self.database.session() as session:
+            rows = (await session.execute(statement)).all()
+            active_incidents = (
+                select(
+                    func.sum(case((IncidentRow.opened_at >= cutoff, 1), else_=0)).label(
+                        "window_total"
+                    ),
+                    func.sum(case((IncidentRow.status == "open", 1), else_=0)).label(
+                        "open_total"
+                    ),
+                )
+                .join(ServiceRow)
+                .where(ServiceRow.active.is_(True))
+            )
+            incident_counts = (await session.execute(active_incidents)).one()
+            incidents_total = int(incident_counts.window_total or 0)
+            open_incidents = int(incident_counts.open_total or 0)
 
         services: list[ServiceMetric] = []
         checks_total = 0
         healthy_checks_total = 0
-        incidents_total = 0
-        weighted_latency_sum = 0.0
+        latency_weighted_sum = 0.0
         latency_observations = 0
         state_counts = {
             "healthy": 0,
@@ -262,11 +625,12 @@ class Repository:
         }
 
         for row in rows:
-            checks = int(row["checks"])
-            healthy_checks = int(row["healthy_checks"])
-            incidents = int(row["incidents"])
-            last_is_healthy = row["last_is_healthy"]
-            last_latency = row["last_latency_ms"]
+            service = row[0]
+            checks = int(row.checks or 0)
+            healthy_checks = int(row.healthy_checks or 0)
+            latency_count = int(row.latency_count or 0)
+            last_is_healthy = row.last_is_healthy
+            last_latency = row.last_latency_ms
 
             if last_is_healthy is None:
                 state = "never_checked"
@@ -280,24 +644,26 @@ class Repository:
             state_counts[state] += 1
             checks_total += checks
             healthy_checks_total += healthy_checks
-            incidents_total += incidents
-            if row["average_latency_ms"] is not None:
-                weighted_latency_sum += float(row["average_latency_ms"]) * checks
-                latency_observations += checks
+            if row.average_latency_ms is not None and latency_count:
+                latency_weighted_sum += float(row.average_latency_ms) * latency_count
+                latency_observations += latency_count
 
             services.append(
                 ServiceMetric(
-                    id=row["id"],
-                    name=row["name"],
-                    url=row["url"],
-                    state=state,
-                    last_checked_at=row["last_checked_at"],
-                    last_status_code=row["last_status_code"],
+                    id=service.id,
+                    name=service.name,
+                    url=service.url,
+                    state=state,  # type: ignore[arg-type]
+                    last_checked_at=(
+                        _aware(row.last_checked_at) if row.last_checked_at else None
+                    ),
+                    last_status_code=row.last_status_code,
                     last_latency_ms=(
                         round(float(last_latency), 2)
                         if last_latency is not None
                         else None
                     ),
+                    next_check_at=_aware(service.next_check_at),
                     checks=checks,
                     uptime_percentage=(
                         round(healthy_checks * 100 / checks, 2) if checks else None
@@ -315,13 +681,14 @@ class Repository:
             never_checked=state_counts["never_checked"],
             checks_total=checks_total,
             incidents_total=incidents_total,
+            open_incidents=open_incidents,
             uptime_percentage=(
                 round(healthy_checks_total * 100 / checks_total, 2)
                 if checks_total
                 else None
             ),
             average_latency_ms=(
-                round(weighted_latency_sum / latency_observations, 2)
+                round(latency_weighted_sum / latency_observations, 2)
                 if latency_observations
                 else None
             ),
