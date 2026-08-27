@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="PulseWatch — asynchronous API reliability monitoring dashboard"
+    />
+    <title>PulseWatch · API Reliability Monitor</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="PulseWatch home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 48 48" role="img">
+            <path d="M7 25h8l4-11 7 22 5-11h10" />
+          </svg>
+        </span>
+        <span>
+          <strong>PulseWatch</strong>
+          <small>API reliability monitor</small>
+        </span>
+      </a>
+
+      <nav aria-label="Project links">
+        <a href="/docs">OpenAPI Docs</a>
+        <a href="https://github.com/TheKhadaJhin" target="_blank" rel="noreferrer">
+          GitHub
+        </a>
+      </nav>
+    </header>
+
+    <main class="page-shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow"><span></span> Operations overview</p>
+          <h1>Know when your APIs<br /><em>stop behaving.</em></h1>
+          <p class="hero-copy">
+            Concurrent health checks, retry-aware incident detection and clear
+            reliability metrics in one lightweight service.
+          </p>
+        </div>
+
+        <div class="hero-controls">
+          <label for="window-hours">Metrics window</label>
+          <select id="window-hours">
+            <option value="1">Last hour</option>
+            <option value="24" selected>Last 24 hours</option>
+            <option value="168">Last 7 days</option>
+            <option value="720">Last 30 days</option>
+          </select>
+          <button class="button button-primary" id="run-all" type="button">
+            <span class="button-dot"></span>
+            Run all checks
+          </button>
+        </div>
+      </section>
+
+      <section class="metrics-grid" aria-label="Reliability metrics">
+        <article class="metric-card accent-green">
+          <p>Overall uptime</p>
+          <strong id="metric-uptime">—</strong>
+          <span id="metric-uptime-note">No checks recorded</span>
+        </article>
+        <article class="metric-card accent-blue">
+          <p>Average latency</p>
+          <strong id="metric-latency">—</strong>
+          <span>Across successful responses</span>
+        </article>
+        <article class="metric-card accent-red">
+          <p>Incidents</p>
+          <strong id="metric-incidents">0</strong>
+          <span id="metric-incidents-note">Within selected window</span>
+        </article>
+        <article class="metric-card accent-purple">
+          <p>Active services</p>
+          <strong id="metric-services">0</strong>
+          <span id="metric-services-note">Nothing monitored yet</span>
+        </article>
+      </section>
+
+      <section class="panel services-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="section-label">Live status</p>
+            <h2>Monitored services</h2>
+          </div>
+          <button class="icon-button" id="refresh" type="button" title="Refresh dashboard">
+            <span aria-hidden="true">↻</span>
+            <span class="sr-only">Refresh dashboard</span>
+          </button>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Service</th>
+                <th>Status</th>
+                <th>Last response</th>
+                <th>24h uptime</th>
+                <th>Last checked</th>
+                <th><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody id="services-body">
+              <tr class="empty-row">
+                <td colspan="6">Loading monitored services…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="lower-grid">
+        <article class="panel add-service-panel">
+          <div class="panel-heading compact">
+            <div>
+              <p class="section-label">Configuration</p>
+              <h2>Add an endpoint</h2>
+            </div>
+          </div>
+
+          <form id="service-form">
+            <label>
+              Service name
+              <input
+                name="name"
+                type="text"
+                minlength="2"
+                maxlength="80"
+                placeholder="Payments API"
+                required
+              />
+            </label>
+            <label>
+              Endpoint URL
+              <input
+                name="url"
+                type="url"
+                placeholder="https://api.example.com/health"
+                required
+              />
+            </label>
+            <div class="form-row">
+              <label>
+                Method
+                <select name="method">
+                  <option value="GET">GET</option>
+                  <option value="HEAD">HEAD</option>
+                </select>
+              </label>
+              <label>
+                Expected status
+                <input name="expected_status" type="number" value="200" min="100" max="599" required />
+              </label>
+            </div>
+            <div class="form-row">
+              <label>
+                Timeout (seconds)
+                <input name="timeout_seconds" type="number" value="5" min="0.2" max="30" step="0.1" required />
+              </label>
+              <label>
+                Retries
+                <select name="retry_count">
+                  <option value="0">0</option>
+                  <option value="1">1</option>
+                  <option value="2" selected>2</option>
+                  <option value="3">3</option>
+                </select>
+              </label>
+            </div>
+            <button class="button button-secondary" type="submit">Add service</button>
+          </form>
+        </article>
+
+        <article class="panel history-panel">
+          <div class="panel-heading compact">
+            <div>
+              <p class="section-label">Audit trail</p>
+              <h2>Recent checks</h2>
+            </div>
+            <span class="live-indicator"><i></i> Live data</span>
+          </div>
+          <ol class="history-list" id="history-list">
+            <li class="history-empty">No check history yet.</li>
+          </ol>
+        </article>
+      </section>
+
+      <section class="engineering-note">
+        <span aria-hidden="true">{ }</span>
+        <div>
+          <strong>Built for observable, testable backend behavior</strong>
+          <p>
+            Async HTTP · bounded concurrency · exponential backoff · SQLite audit trail ·
+            OpenAPI · SSRF safeguards · automated tests
+          </p>
+        </div>
+        <a href="/docs">Explore the API →</a>
+      </section>
+    </main>
+
+    <footer>
+      <span>PulseWatch v1.0</span>
+      <span>Designed and engineered by Mario Fuentes</span>
+    </footer>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

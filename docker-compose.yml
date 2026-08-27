@@ -1,0 +1,14 @@
+services:
+  pulsewatch:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      PULSEWATCH_DATABASE_PATH: /app/data/pulsewatch.db
+      PULSEWATCH_CHECK_CONCURRENCY: 5
+    volumes:
+      - pulsewatch-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  pulsewatch-data:
