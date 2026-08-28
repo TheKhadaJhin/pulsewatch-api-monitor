@@ -17,6 +17,13 @@ It is intentionally more than a CRUD demo: the project models failure, recovery,
 operational safety, database evolution, and deployment boundaries—the parts that
 make backend systems interesting in real work.
 
+## Operations dashboard
+
+![PulseWatch operations dashboard showing uptime, latency, incidents, and monitored services](docs/images/pulsewatch-dashboard.jpg)
+
+The preview uses safe demonstration data to show healthy, degraded, and failed
+service states without representing a live production environment.
+
 ## Why this project exists
 
 Teams depend on APIs that can become slow, return an unexpected status, or stop
